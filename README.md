@@ -12,6 +12,13 @@ A work in progress implementation of a SurrealDB Checkpointer for Langgraph.
 
 ## USAGE
 
+```sh
+pip install langgraph-checkpoint-surrealdb
+```
+
+Then just pass the connection parameters when instantiating it. 
+
+
 ```python
 # Initialize SurrealDB connection
 memory = SurrealSaver(url="ws://localhost:8000/rpc", user="root", password="root", namespace="ns", database="db")
