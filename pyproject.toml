@@ -1,0 +1,33 @@
+[project]
+name = "langgraph-checkpoint-surrealdb"
+version = "0.1.0"
+description = "A SurrealDB Saver for Langgraph Checkpoints"
+readme = "README.md"
+requires-python = ">=3.10.6"
+dependencies = [
+    "langchain-core>=0.3.33",
+    "langgraph>=0.2.69",
+    "surrealdb>=1.0.3",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+    "ipywidgets>=8.1.5",
+    "ruff>=0.8.4",
+    "mypy>=1.14.1",
+]
+
+[build-system]
+requires = ["hatchling", "pip"]
+build-backend = "hatchling.build"
+
+[tool.setuptools]
+package-dir = {"langgraph-checkpoint-surrealdb" = "src/langgraph-checkpoint-surrealdb"}
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
