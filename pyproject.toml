@@ -10,6 +10,11 @@ dependencies = [
     "surrealdb>=1.0.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb"
+Source = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb"
+Tracker = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb/issues"
+
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.5",

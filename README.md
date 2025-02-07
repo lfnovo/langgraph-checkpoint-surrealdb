@@ -14,7 +14,7 @@ A work in progress implementation of a SurrealDB Checkpointer for Langgraph.
 
 ```python
 # Initialize SurrealDB connection
-memory = SurrealSaver(url="ws://localhost:8012/rpc", user="root", password="root", namespace="ns", database="db")
+memory = SurrealSaver(url="ws://localhost:8000/rpc", user="root", password="root", namespace="ns", database="db")
 
 class ThreadState(BaseModel):
     messages: Annotated[list, operator.add] = Field(default_factory=list)
