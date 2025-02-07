@@ -1,9 +1,9 @@
 [project]
 name = "langgraph-checkpoint-surrealdb"
-version = "0.1.2"
+version = "0.1.3"
 description = "A SurrealDB Saver for Langgraph Checkpoints"
 readme = "README.md"
-requires-python = ">=3.10.6"
+requires-python = ">=3.10"
 dependencies = [
     "langchain-core>=0.3.33",
     "langgraph>=0.2.69",
