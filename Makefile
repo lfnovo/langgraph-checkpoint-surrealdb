@@ -1,4 +1,4 @@
 
 
 test:
-	uv run pytest tests/test_integration.py -v
+	uv run pytest tests -v

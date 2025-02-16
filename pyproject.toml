@@ -1,47 +1,18 @@
-[project]
+[tool.poetry]
 name = "langgraph-checkpoint-surrealdb"
-version = "0.2.1"
-description = "A SurrealDB Saver for Langgraph Checkpoints"
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "langchain-core>=0.3.33",
-    "langgraph>=0.2.69",
-    "surrealdb>=1.0.3",
-]
+version = "0.1.1"
+description = "A SurrealDB Checkpointer for Langgraph with both synchronous and asynchronous support."
+authors = ["Your Name <you@example.com>"]
 
-[project.urls]
-Homepage = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb"
-Source = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb"
-Tracker = "https://github.com/lfnovo/langgraph-checkpoint-surrealdb/issues"
+[tool.poetry.dependencies]
+python = "^3.10"
+# ... (other dependencies)
 
-[dependency-groups]
-dev = [
-    "ipykernel>=6.29.5",
-    "ipywidgets>=8.1.5",
-    "ruff>=0.8.4",
-    "mypy>=1.14.1",
-    "langgraph>=0.2.70",
-    "pytest>=8.3.4",
-    "langchain-openai>=0.3.5",
-    "pytest-asyncio>=0.25.3",
-    "python-dotenv>=1.0.1",
-]
+[tool.poetry.dev-dependencies]
+pytest = "^8.3.4"
+pytest-asyncio = "^0.25.3"
+# ... (other dev-dependencies)
 
 [build-system]
-requires = ["hatchling", "pip"]
-build-backend = "hatchling.build"
-
-[tool.setuptools]
-package-dir = {"langgraph-checkpoint-surrealdb" = "src/langgraph-checkpoint-surrealdb"}
-
-[tool.ruff]
-line-length = 88
-
-[tool.ruff.lint]
-select = ["E", "F", "I"]
-ignore = ["E501"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
-asyncio_default_fixture_loop_scope = "function"
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

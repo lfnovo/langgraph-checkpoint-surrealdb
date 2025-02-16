@@ -1,7 +1,33 @@
+import logging
 import random
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple, cast
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+# Type alias for clarity
+JsonDict = Dict[str, Any]
+
+
+class CheckpointError(Exception):
+    """Base exception for checkpoint operations."""
+
+    pass
+
+
+class CheckpointReadError(CheckpointError):
+    """Raised when there's an error reading checkpoint data."""
+
+    pass
+
+
+class CheckpointSaveError(CheckpointError):
+    """Raised when there's an error saving checkpoint data."""
+
+    pass
+
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -47,19 +73,42 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         db = Surreal(self.url)
         db.signin({"username": self.user, "password": self.password})
         db.use(self.namespace, self.database)
-        yield db
+        scheme = urlparse(self.url).scheme.lower()
+        try:
+            yield db
+        finally:
+            # Only close the connection for websocket protocols.
+            if scheme in ("ws", "wss"):
+                db.close()
 
     @asynccontextmanager
     async def adb_connection(self):
         db = AsyncSurreal(self.url)
         await db.signin({"username": self.user, "password": self.password})
         await db.use(self.namespace, self.database)
-        yield db
+        scheme = urlparse(self.url).scheme.lower()
+        try:
+            yield db
+        finally:
+            # Only close the connection for websocket protocols.
+            if scheme in ("ws", "wss"):
+                await db.close()
 
     def setup(self) -> None:
         self.is_setup = True
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+        """Get a checkpoint tuple from the database.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+
+        Returns:
+            Optional[CheckpointTuple]: The checkpoint tuple if found, None otherwise.
+
+        Raises:
+            CheckpointReadError: If there's an error reading from the database.
+        """
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         with self.db_connection() as connection:
             try:
@@ -77,14 +126,27 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 else:
                     query += " ORDER BY checkpoint_id DESC limit 1"
 
-                result = connection.query(query)
+                try:
+                    result = connection.query(query)
+                except Exception as e:
+                    logger.error(
+                        "Failed to query checkpoint data",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "error": str(e),
+                        },
+                    )
+                    raise CheckpointReadError(
+                        f"Unable to retrieve checkpoint data: {str(e)}"
+                    ) from e
 
                 if len(result) > 0:
                     result_dict = result[0]
                     thread_id = result_dict["thread_id"]
                     checkpoint_id = result_dict["checkpoint_id"]
                     parent_checkpoint_id = result_dict["parent_checkpoint_id"]
-                    type = result_dict["type"]
+                    type_ = result_dict["type"]
                     checkpoint = result_dict["checkpoint"]
                     metadata = result_dict["metadata"]
                     if not get_checkpoint_id(config):
@@ -98,14 +160,69 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
                     # find any pending writes
                     query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
-                    results = connection.query(query)
+                    try:
+                        results = connection.query(query)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to query write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to retrieve write data: {str(e)}"
+                        ) from e
+
+                    try:
+                        checkpoint_data = self.serde.loads_typed((type_, checkpoint))
+                        metadata_dict = cast(
+                            CheckpointMetadata,
+                            self.jsonplus_serde.loads(metadata)
+                            if metadata is not None
+                            else {},
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize checkpoint data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize checkpoint data: {str(e)}"
+                        ) from e
+
+                    try:
+                        writes = [
+                            (
+                                r["task_id"],
+                                r["channel"],
+                                self.serde.loads_typed((type_, r["value"])),
+                            )
+                            for r in results
+                        ]
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize write data: {str(e)}"
+                        ) from e
 
                     return CheckpointTuple(
                         config,
-                        self.serde.loads_typed((type, checkpoint)),
-                        self.jsonplus_serde.loads(metadata)
-                        if metadata is not None
-                        else {},
+                        checkpoint_data,
+                        metadata_dict,
                         (
                             {
                                 "configurable": {
@@ -117,18 +234,29 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             if parent_checkpoint_id
                             else None
                         ),
-                        [
-                            (
-                                r["task_id"],
-                                r["channel"],
-                                self.serde.loads_typed((type, r["value"])),
-                            )
-                            for r in results
-                        ],
+                        writes,
                     )
                 else:
+                    logger.debug(
+                        "No checkpoint found",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                        },
+                    )
                     return None
-            except:
+            except Exception as e:
+                if not isinstance(e, CheckpointReadError):
+                    logger.error(
+                        "Unexpected error retrieving checkpoint",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        },
+                    )
+                    raise CheckpointReadError(
+                        f"Unexpected error retrieving checkpoint: {str(e)}"
+                    ) from e
                 raise
 
     def list(
@@ -139,63 +267,141 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> Iterator[CheckpointTuple]:
+        """List checkpoints from the database.
+
+        Args:
+            config: Optional configuration containing thread and checkpoint information.
+            filter: Optional filter criteria.
+            before: Optional configuration to list checkpoints before.
+            limit: Optional maximum number of checkpoints to return.
+
+        Returns:
+            Iterator[CheckpointTuple]: Iterator of checkpoint tuples.
+
+        Raises:
+            CheckpointReadError: If there's an error reading from the database.
+        """
         thread_id = (
             str(config.get("configurable", {}).get("thread_id", "")) if config else ""
         )
         checkpoint_ns = (
             config.get("configurable", {}).get("checkpoint_ns", "") if config else ""
         )
-        # todo: parameter filtering
-        # where, param_values = search_where(config, filter, before)
         query = f"""SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
         FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' ORDER BY checkpoint_id DESC"""
         if limit:
             query += f" LIMIT {limit}"
 
         with self.db_connection() as connection:
-            results = connection.query(query)
-            for r in results:
-                thread_id = r["thread_id"]
-                checkpoint_ns = r["checkpoint_ns"]
-                checkpoint_id = r["checkpoint_id"]
-                parent_checkpoint_id = r["parent_checkpoint_id"]
-                type = r["type"]
-                checkpoint = r["checkpoint"]
-                metadata = r["metadata"]
-
-                query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
-                task_results = connection.query(query)
-
-                yield CheckpointTuple(
-                    {
-                        "configurable": {
-                            "thread_id": thread_id,
-                            "checkpoint_ns": checkpoint_ns,
-                            "checkpoint_id": checkpoint_id,
-                        }
+            try:
+                results = connection.query(query)
+            except Exception as e:
+                logger.error(
+                    "Failed to query checkpoints",
+                    extra={
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "error": str(e),
                     },
-                    self.serde.loads_typed((type, checkpoint)),
-                    self.jsonplus_serde.loads(metadata) if metadata is not None else {},
-                    (
+                )
+                raise CheckpointReadError(
+                    f"Unable to retrieve checkpoints: {str(e)}"
+                ) from e
+
+            for r in results:
+                try:
+                    thread_id = r["thread_id"]
+                    checkpoint_ns = r["checkpoint_ns"]
+                    checkpoint_id = r["checkpoint_id"]
+                    parent_checkpoint_id = r["parent_checkpoint_id"]
+                    type_ = r["type"]
+                    checkpoint = r["checkpoint"]
+                    metadata = r["metadata"]
+
+                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    try:
+                        task_results = connection.query(query)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to query write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to retrieve write data: {str(e)}"
+                        ) from e
+
+                    try:
+                        checkpoint_data = self.serde.loads_typed((type_, checkpoint))
+                        metadata_dict = cast(
+                            CheckpointMetadata,
+                            self.jsonplus_serde.loads(metadata)
+                            if metadata is not None
+                            else {},
+                        )
+                        writes = [
+                            (
+                                tr["task_id"],
+                                tr["channel"],
+                                self.serde.loads_typed((type_, tr["value"])),
+                            )
+                            for tr in task_results
+                        ]
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize checkpoint or write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize checkpoint data: {str(e)}"
+                        ) from e
+
+                    yield CheckpointTuple(
                         {
                             "configurable": {
                                 "thread_id": thread_id,
                                 "checkpoint_ns": checkpoint_ns,
-                                "checkpoint_id": parent_checkpoint_id,
+                                "checkpoint_id": checkpoint_id,
                             }
-                        }
-                        if parent_checkpoint_id
-                        else None
-                    ),
-                    [
+                        },
+                        checkpoint_data,
+                        metadata_dict,
                         (
-                            tr["task_id"],
-                            tr["channel"],
-                            self.serde.loads_typed((type, tr["value"])),
+                            {
+                                "configurable": {
+                                    "thread_id": thread_id,
+                                    "checkpoint_ns": checkpoint_ns,
+                                    "checkpoint_id": parent_checkpoint_id,
+                                }
+                            }
+                            if parent_checkpoint_id
+                            else None
+                        ),
+                        writes,
+                    )
+                except Exception as e:
+                    if not isinstance(e, CheckpointReadError):
+                        logger.error(
+                            "Unexpected error processing checkpoint",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                            },
                         )
-                        for tr in task_results
-                    ],
-                )
+                        raise CheckpointReadError(
+                            f"Unexpected error processing checkpoint: {str(e)}"
+                        ) from e
+                    raise
 
     def put(
         self,
@@ -204,30 +410,73 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
+        """Save a checkpoint to the database.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+            checkpoint: The checkpoint data to save.
+            metadata: Metadata associated with the checkpoint.
+            new_versions: Version information for channels.
+
+        Returns:
+            RunnableConfig: Updated configuration.
+
+        Raises:
+            CheckpointSaveError: If there's an error saving to the database.
+        """
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"]["checkpoint_ns"]
-        type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
-        serialized_metadata = self.jsonplus_serde.dumps(metadata)
-        with self.db_connection() as connection:
-            existing_query = connection.query(
-                f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
+        try:
+            type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
+            serialized_metadata = self.jsonplus_serde.dumps(metadata)
+        except Exception as e:
+            logger.error(
+                "Failed to serialize checkpoint data",
+                extra={
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "error": str(e),
+                },
             )
-            if existing_query:
-                record_id = existing_query[0]["id"]
-            else:
-                record_id = "checkpoint"
+            raise CheckpointSaveError(
+                f"Unable to serialize checkpoint data: {str(e)}"
+            ) from e
 
-            merge_data = {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint["id"],
-                "parent_checkpoint_id": config["configurable"].get("checkpoint_id"),
-                "type": type_,
-                "checkpoint": serialized_checkpoint,
-                "metadata": serialized_metadata,
-            }
+        with self.db_connection() as connection:
+            try:
+                existing_query = connection.query(
+                    f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
+                )
+                if existing_query:
+                    record_id = existing_query[0]["id"]
+                else:
+                    record_id = "checkpoint"
 
-            connection.upsert(record_id, merge_data)
+                merge_data = {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint["id"],
+                    "parent_checkpoint_id": config["configurable"].get("checkpoint_id"),
+                    "type": type_,
+                    "checkpoint": serialized_checkpoint,
+                    "metadata": serialized_metadata,
+                }
+
+                connection.upsert(record_id, merge_data)
+            except Exception as e:
+                logger.error(
+                    "Failed to save checkpoint",
+                    extra={
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint["id"],
+                        "error": str(e),
+                    },
+                )
+                raise CheckpointSaveError(
+                    f"Unable to save checkpoint data: {str(e)}"
+                ) from e
+
         return {
             "configurable": {
                 "thread_id": thread_id,
@@ -243,12 +492,44 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         task_id: str,
         task_path: str = "",
     ) -> None:
+        """Save writes to the database.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+            writes: Sequence of writes to save.
+            task_id: ID of the task.
+            task_path: Optional path of the task.
+
+        Raises:
+            CheckpointSaveError: If there's an error saving to the database.
+        """
+        thread_id = config["configurable"]["thread_id"]
+        checkpoint_ns = config["configurable"]["checkpoint_ns"]
+        checkpoint_id = config["configurable"]["checkpoint_id"]
+
         for idx, (channel, value) in enumerate(writes):
-            type_, serialized_value = self.serde.dumps_typed(value)
+            try:
+                type_, serialized_value = self.serde.dumps_typed(value)
+            except Exception as e:
+                logger.error(
+                    "Failed to serialize write data",
+                    extra={
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                        "task_id": task_id,
+                        "channel": channel,
+                        "error": str(e),
+                    },
+                )
+                raise CheckpointSaveError(
+                    f"Unable to serialize write data: {str(e)}"
+                ) from e
+
             merge_data = {
-                "thread_id": config["configurable"]["thread_id"],
-                "checkpoint_ns": config["configurable"]["checkpoint_ns"],
-                "checkpoint_id": config["configurable"]["checkpoint_id"],
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint_id,
                 "task_id": task_id,
                 "idx": WRITES_IDX_MAP.get(channel, idx),
                 "channel": channel,
@@ -256,11 +537,38 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 "value": serialized_value,
                 "task_path": task_path,
             }
+
             with self.db_connection() as connection:
-                connection.upsert("write", merge_data)
+                try:
+                    connection.upsert("write", merge_data)
+                except Exception as e:
+                    logger.error(
+                        "Failed to save write data",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "checkpoint_id": checkpoint_id,
+                            "task_id": task_id,
+                            "channel": channel,
+                            "error": str(e),
+                        },
+                    )
+                    raise CheckpointSaveError(
+                        f"Unable to save write data: {str(e)}"
+                    ) from e
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        """Get a checkpoint tuple from the database asynchronously."""
+        """Get a checkpoint tuple from the database asynchronously.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+
+        Returns:
+            Optional[CheckpointTuple]: The checkpoint tuple if found, None otherwise.
+
+        Raises:
+            CheckpointReadError: If there's an error reading from the database.
+        """
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         async with self.adb_connection() as connection:
             try:
@@ -278,14 +586,27 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 else:
                     query += " ORDER BY checkpoint_id DESC limit 1"
 
-                result = await connection.query(query)
+                try:
+                    result = await connection.query(query)
+                except Exception as e:
+                    logger.error(
+                        "Failed to query checkpoint data",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "error": str(e),
+                        },
+                    )
+                    raise CheckpointReadError(
+                        f"Unable to retrieve checkpoint data: {str(e)}"
+                    ) from e
 
                 if len(result) > 0:
                     result_dict = result[0]
                     thread_id = result_dict["thread_id"]
                     checkpoint_id = result_dict["checkpoint_id"]
                     parent_checkpoint_id = result_dict["parent_checkpoint_id"]
-                    type = result_dict["type"]
+                    type_ = result_dict["type"]
                     checkpoint = result_dict["checkpoint"]
                     metadata = result_dict["metadata"]
                     if not get_checkpoint_id(config):
@@ -299,14 +620,69 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
                     # find any pending writes
                     query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
-                    results = await connection.query(query)
+                    try:
+                        results = await connection.query(query)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to query write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to retrieve write data: {str(e)}"
+                        ) from e
+
+                    try:
+                        checkpoint_data = self.serde.loads_typed((type_, checkpoint))
+                        metadata_dict = cast(
+                            CheckpointMetadata,
+                            self.jsonplus_serde.loads(metadata)
+                            if metadata is not None
+                            else {},
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize checkpoint data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize checkpoint data: {str(e)}"
+                        ) from e
+
+                    try:
+                        writes = [
+                            (
+                                r["task_id"],
+                                r["channel"],
+                                self.serde.loads_typed((type_, r["value"])),
+                            )
+                            for r in results
+                        ]
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize write data: {str(e)}"
+                        ) from e
 
                     return CheckpointTuple(
                         config,
-                        self.serde.loads_typed((type, checkpoint)),
-                        self.jsonplus_serde.loads(metadata)
-                        if metadata is not None
-                        else {},
+                        checkpoint_data,
+                        metadata_dict,
                         (
                             {
                                 "configurable": {
@@ -318,18 +694,29 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             if parent_checkpoint_id
                             else None
                         ),
-                        [
-                            (
-                                r["task_id"],
-                                r["channel"],
-                                self.serde.loads_typed((type, r["value"])),
-                            )
-                            for r in results
-                        ],
+                        writes,
                     )
                 else:
+                    logger.debug(
+                        "No checkpoint found",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                        },
+                    )
                     return None
-            except:
+            except Exception as e:
+                if not isinstance(e, CheckpointReadError):
+                    logger.error(
+                        "Unexpected error retrieving checkpoint",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        },
+                    )
+                    raise CheckpointReadError(
+                        f"Unexpected error retrieving checkpoint: {str(e)}"
+                    ) from e
                 raise
 
     async def alist(
@@ -340,7 +727,20 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoints from the database asynchronously."""
+        """List checkpoints from the database asynchronously.
+
+        Args:
+            config: Optional configuration containing thread and checkpoint information.
+            filter: Optional filter criteria.
+            before: Optional configuration to list checkpoints before.
+            limit: Optional maximum number of checkpoints to return.
+
+        Returns:
+            AsyncIterator[CheckpointTuple]: Iterator of checkpoint tuples.
+
+        Raises:
+            CheckpointReadError: If there's an error reading from the database.
+        """
         thread_id = (
             str(config.get("configurable", {}).get("thread_id", "")) if config else ""
         )
@@ -353,49 +753,115 @@ class SurrealSaver(BaseCheckpointSaver[str]):
             query += f" LIMIT {limit}"
 
         async with self.adb_connection() as connection:
-            results = await connection.query(query)
-            for r in results:
-                thread_id = r["thread_id"]
-                checkpoint_ns = r["checkpoint_ns"]
-                checkpoint_id = r["checkpoint_id"]
-                parent_checkpoint_id = r["parent_checkpoint_id"]
-                type = r["type"]
-                checkpoint = r["checkpoint"]
-                metadata = r["metadata"]
-
-                query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
-                task_results = await connection.query(query)
-
-                yield CheckpointTuple(
-                    {
-                        "configurable": {
-                            "thread_id": thread_id,
-                            "checkpoint_ns": checkpoint_ns,
-                            "checkpoint_id": checkpoint_id,
-                        }
+            try:
+                results = await connection.query(query)
+            except Exception as e:
+                logger.error(
+                    "Failed to query checkpoints",
+                    extra={
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "error": str(e),
                     },
-                    self.serde.loads_typed((type, checkpoint)),
-                    self.jsonplus_serde.loads(metadata) if metadata is not None else {},
-                    (
+                )
+                raise CheckpointReadError(
+                    f"Unable to retrieve checkpoints: {str(e)}"
+                ) from e
+
+            for r in results:
+                try:
+                    thread_id = r["thread_id"]
+                    checkpoint_ns = r["checkpoint_ns"]
+                    checkpoint_id = r["checkpoint_id"]
+                    parent_checkpoint_id = r["parent_checkpoint_id"]
+                    type_ = r["type"]
+                    checkpoint = r["checkpoint"]
+                    metadata = r["metadata"]
+
+                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    try:
+                        task_results = await connection.query(query)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to query write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to retrieve write data: {str(e)}"
+                        ) from e
+
+                    try:
+                        checkpoint_data = self.serde.loads_typed((type_, checkpoint))
+                        metadata_dict = cast(
+                            CheckpointMetadata,
+                            self.jsonplus_serde.loads(metadata)
+                            if metadata is not None
+                            else {},
+                        )
+                        writes = [
+                            (
+                                tr["task_id"],
+                                tr["channel"],
+                                self.serde.loads_typed((type_, tr["value"])),
+                            )
+                            for tr in task_results
+                        ]
+                    except Exception as e:
+                        logger.error(
+                            "Failed to deserialize checkpoint or write data",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                            },
+                        )
+                        raise CheckpointReadError(
+                            f"Unable to deserialize checkpoint data: {str(e)}"
+                        ) from e
+
+                    yield CheckpointTuple(
                         {
                             "configurable": {
                                 "thread_id": thread_id,
                                 "checkpoint_ns": checkpoint_ns,
-                                "checkpoint_id": parent_checkpoint_id,
+                                "checkpoint_id": checkpoint_id,
                             }
-                        }
-                        if parent_checkpoint_id
-                        else None
-                    ),
-                    [
+                        },
+                        checkpoint_data,
+                        metadata_dict,
                         (
-                            tr["task_id"],
-                            tr["channel"],
-                            self.serde.loads_typed((type, tr["value"])),
+                            {
+                                "configurable": {
+                                    "thread_id": thread_id,
+                                    "checkpoint_ns": checkpoint_ns,
+                                    "checkpoint_id": parent_checkpoint_id,
+                                }
+                            }
+                            if parent_checkpoint_id
+                            else None
+                        ),
+                        writes,
+                    )
+                except Exception as e:
+                    if not isinstance(e, CheckpointReadError):
+                        logger.error(
+                            "Unexpected error processing checkpoint",
+                            extra={
+                                "thread_id": thread_id,
+                                "checkpoint_id": checkpoint_id,
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                            },
                         )
-                        for tr in task_results
-                    ],
-                )
+                        raise CheckpointReadError(
+                            f"Unexpected error processing checkpoint: {str(e)}"
+                        ) from e
+                    raise
 
     async def aput(
         self,
@@ -404,31 +870,73 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Save a checkpoint to the database asynchronously."""
+        """Save a checkpoint to the database asynchronously.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+            checkpoint: The checkpoint data to save.
+            metadata: Metadata associated with the checkpoint.
+            new_versions: Version information for channels.
+
+        Returns:
+            RunnableConfig: Updated configuration.
+
+        Raises:
+            CheckpointSaveError: If there's an error saving to the database.
+        """
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"]["checkpoint_ns"]
-        type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
-        serialized_metadata = self.jsonplus_serde.dumps(metadata)
-        async with self.adb_connection() as connection:
-            existing_query = await connection.query(
-                f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
+        try:
+            type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
+            serialized_metadata = self.jsonplus_serde.dumps(metadata)
+        except Exception as e:
+            logger.error(
+                "Failed to serialize checkpoint data",
+                extra={
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "error": str(e),
+                },
             )
-            if existing_query:
-                record_id = existing_query[0]["id"]
-            else:
-                record_id = "checkpoint"
+            raise CheckpointSaveError(
+                f"Unable to serialize checkpoint data: {str(e)}"
+            ) from e
 
-            merge_data = {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": checkpoint["id"],
-                "parent_checkpoint_id": config["configurable"].get("checkpoint_id"),
-                "type": type_,
-                "checkpoint": serialized_checkpoint,
-                "metadata": serialized_metadata,
-            }
+        async with self.adb_connection() as connection:
+            try:
+                existing_query = await connection.query(
+                    f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
+                )
+                if existing_query:
+                    record_id = existing_query[0]["id"]
+                else:
+                    record_id = "checkpoint"
 
-            await connection.upsert(record_id, merge_data)
+                merge_data = {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint["id"],
+                    "parent_checkpoint_id": config["configurable"].get("checkpoint_id"),
+                    "type": type_,
+                    "checkpoint": serialized_checkpoint,
+                    "metadata": serialized_metadata,
+                }
+
+                await connection.upsert(record_id, merge_data)
+            except Exception as e:
+                logger.error(
+                    "Failed to save checkpoint",
+                    extra={
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint["id"],
+                        "error": str(e),
+                    },
+                )
+                raise CheckpointSaveError(
+                    f"Unable to save checkpoint data: {str(e)}"
+                ) from e
+
         return {
             "configurable": {
                 "thread_id": thread_id,
@@ -444,14 +952,45 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Save writes to the database asynchronously."""
+        """Save writes to the database asynchronously.
+
+        Args:
+            config: The configuration containing thread and checkpoint information.
+            writes: Sequence of writes to save.
+            task_id: ID of the task.
+            task_path: Optional path of the task.
+
+        Raises:
+            CheckpointSaveError: If there's an error saving to the database.
+        """
+        thread_id = config["configurable"]["thread_id"]
+        checkpoint_ns = config["configurable"]["checkpoint_ns"]
+        checkpoint_id = config["configurable"]["checkpoint_id"]
+
         async with self.adb_connection() as connection:
             for idx, (channel, value) in enumerate(writes):
-                type_, serialized_value = self.serde.dumps_typed(value)
+                try:
+                    type_, serialized_value = self.serde.dumps_typed(value)
+                except Exception as e:
+                    logger.error(
+                        "Failed to serialize write data",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "checkpoint_id": checkpoint_id,
+                            "task_id": task_id,
+                            "channel": channel,
+                            "error": str(e),
+                        },
+                    )
+                    raise CheckpointSaveError(
+                        f"Unable to serialize write data: {str(e)}"
+                    ) from e
+
                 merge_data = {
-                    "thread_id": config["configurable"]["thread_id"],
-                    "checkpoint_ns": config["configurable"]["checkpoint_ns"],
-                    "checkpoint_id": config["configurable"]["checkpoint_id"],
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint_id,
                     "task_id": task_id,
                     "idx": WRITES_IDX_MAP.get(channel, idx),
                     "channel": channel,
@@ -459,7 +998,24 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     "value": serialized_value,
                     "task_path": task_path,
                 }
-                await connection.upsert("write", merge_data)
+
+                try:
+                    await connection.upsert("write", merge_data)
+                except Exception as e:
+                    logger.error(
+                        "Failed to save write data",
+                        extra={
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "checkpoint_id": checkpoint_id,
+                            "task_id": task_id,
+                            "channel": channel,
+                            "error": str(e),
+                        },
+                    )
+                    raise CheckpointSaveError(
+                        f"Unable to save write data: {str(e)}"
+                    ) from e
 
     def get_next_version(self, current: Optional[str], channel: ChannelProtocol) -> str:
         """Generate the next version ID for a channel.
