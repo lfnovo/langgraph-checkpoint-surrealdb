@@ -1,4 +1,4 @@
-# Surreal Saver
+# Surreal Saver v1.4.0
 
 A SurrealDB Checkpointer for Langgraph with both synchronous and asynchronous support.
 

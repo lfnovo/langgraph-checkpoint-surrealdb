@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "langgraph-checkpoint-surrealdb"
-version = "0.1.1"
+version = "1.4.0"
 description = "A SurrealDB Checkpointer for Langgraph with both synchronous and asynchronous support."
 authors = ["Your Name <you@example.com>"]
 
