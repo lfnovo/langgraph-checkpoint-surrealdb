@@ -114,20 +114,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
             try:
                 thread_id = str(config["configurable"]["thread_id"])
 
-                query = f"""
+                query = """
                 SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, 
                 checkpoint, metadata 
                 FROM checkpoint WHERE 
-                thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}'
+                thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
                 """
 
+                vars = {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}
+
                 if checkpoint_id := get_checkpoint_id(config):
-                    query += f" AND checkpoint_id = '{checkpoint_id}'"
+                    vars["checkpoint_id"] = checkpoint_id
+                    query += " AND checkpoint_id = $checkpoint_id"
                 else:
                     query += " ORDER BY checkpoint_id DESC limit 1"
 
                 try:
-                    result = connection.query(query)
+                    result = connection.query(query, vars)
                 except Exception as e:
                     logger.error(
                         "Failed to query checkpoint data",
@@ -159,9 +162,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         }
 
                     # find any pending writes
-                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    query = """
+                    SELECT task_id, channel, type, value, idx 
+                    FROM write 
+                    WHERE thread_id = $thread_id 
+                    AND checkpoint_ns = $checkpoint_ns 
+                    AND checkpoint_id = $checkpoint_id 
+                    ORDER BY task_id, idx
+                    """
+
+                    vars = {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                    }
+
                     try:
-                        results = connection.query(query)
+                        results = connection.query(query, vars)
                     except Exception as e:
                         logger.error(
                             "Failed to query write data",
@@ -287,14 +304,25 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         checkpoint_ns = (
             config.get("configurable", {}).get("checkpoint_ns", "") if config else ""
         )
-        query = f"""SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
-        FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' ORDER BY checkpoint_id DESC"""
+        query = """
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        FROM checkpoint 
+        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns 
+        ORDER BY checkpoint_id DESC
+        """
+
+        vars = {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+        }
+
         if limit:
-            query += f" LIMIT {limit}"
+            vars["limit"] = limit
+            query += " LIMIT $limit"
 
         with self.db_connection() as connection:
             try:
-                results = connection.query(query)
+                results = connection.query(query, vars)
             except Exception as e:
                 logger.error(
                     "Failed to query checkpoints",
@@ -318,9 +346,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     checkpoint = r["checkpoint"]
                     metadata = r["metadata"]
 
-                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    query = """
+                    SELECT task_id, channel, type, value, idx 
+                    FROM write 
+                    WHERE thread_id = $thread_id 
+                    AND checkpoint_ns = $checkpoint_ns 
+                    AND checkpoint_id = $checkpoint_id 
+                    ORDER BY task_id, idx
+                    """
+
+                    vars = {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                    }
+
                     try:
-                        task_results = connection.query(query)
+                        task_results = connection.query(query, vars)
                     except Exception as e:
                         logger.error(
                             "Failed to query write data",
@@ -444,9 +486,20 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
         with self.db_connection() as connection:
             try:
-                existing_query = connection.query(
-                    f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
-                )
+                query = """
+                SELECT id FROM checkpoint 
+                WHERE thread_id = $thread_id 
+                AND checkpoint_ns = $checkpoint_ns 
+                AND checkpoint_id = $checkpoint_id
+                """
+
+                vars = {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint["id"],
+                }
+
+                existing_query = connection.query(query, vars)
                 if existing_query:
                     record_id = existing_query[0]["id"]
                 else:
@@ -574,20 +627,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
             try:
                 thread_id = str(config["configurable"]["thread_id"])
 
-                query = f"""
+                query = """
                 SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, 
                 checkpoint, metadata 
                 FROM checkpoint WHERE 
-                thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}'
+                thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
                 """
 
+                vars = {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}
+
                 if checkpoint_id := get_checkpoint_id(config):
-                    query += f" AND checkpoint_id = '{checkpoint_id}'"
+                    vars["checkpoint_id"] = checkpoint_id
+                    query += " AND checkpoint_id = $checkpoint_id"
                 else:
                     query += " ORDER BY checkpoint_id DESC limit 1"
 
                 try:
-                    result = await connection.query(query)
+                    result = await connection.query(query, vars)
                 except Exception as e:
                     logger.error(
                         "Failed to query checkpoint data",
@@ -619,9 +675,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         }
 
                     # find any pending writes
-                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    query = """
+                    SELECT task_id, channel, type, value, idx 
+                    FROM write 
+                    WHERE thread_id = $thread_id 
+                    AND checkpoint_ns = $checkpoint_ns 
+                    AND checkpoint_id = $checkpoint_id 
+                    ORDER BY task_id, idx
+                    """
+
+                    vars = {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                    }
+
                     try:
-                        results = await connection.query(query)
+                        results = await connection.query(query, vars)
                     except Exception as e:
                         logger.error(
                             "Failed to query write data",
@@ -747,14 +817,25 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         checkpoint_ns = (
             config.get("configurable", {}).get("checkpoint_ns", "") if config else ""
         )
-        query = f"""SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
-        FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' ORDER BY checkpoint_id DESC"""
+        query = """
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        FROM checkpoint 
+        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns 
+        ORDER BY checkpoint_id DESC
+        """
+
+        vars = {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+        }
+
         if limit:
-            query += f" LIMIT {limit}"
+            vars["limit"] = limit
+            query += " LIMIT $limit"
 
         async with self.adb_connection() as connection:
             try:
-                results = await connection.query(query)
+                results = await connection.query(query, vars)
             except Exception as e:
                 logger.error(
                     "Failed to query checkpoints",
@@ -778,9 +859,23 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     checkpoint = r["checkpoint"]
                     metadata = r["metadata"]
 
-                    query = f"SELECT task_id, channel, type, value, idx FROM write WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' AND checkpoint_id = '{checkpoint_id}' ORDER BY task_id, idx"
+                    query = """
+                    SELECT task_id, channel, type, value, idx 
+                    FROM write 
+                    WHERE thread_id = $thread_id 
+                    AND checkpoint_ns = $checkpoint_ns 
+                    AND checkpoint_id = $checkpoint_id 
+                    ORDER BY task_id, idx
+                    """
+
+                    vars = {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                    }
+
                     try:
-                        task_results = await connection.query(query)
+                        task_results = await connection.query(query, vars)
                     except Exception as e:
                         logger.error(
                             "Failed to query write data",
@@ -904,9 +999,20 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
         async with self.adb_connection() as connection:
             try:
-                existing_query = await connection.query(
-                    f"SELECT id FROM checkpoint WHERE thread_id = '{thread_id}' AND checkpoint_ns = '{checkpoint_ns}' and checkpoint_id='{checkpoint['id']}'"
-                )
+                query = """
+                SELECT id FROM checkpoint 
+                WHERE thread_id = $thread_id 
+                AND checkpoint_ns = $checkpoint_ns 
+                AND checkpoint_id = $checkpoint_id
+                """
+
+                vars = {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint["id"],
+                }
+
+                existing_query = await connection.query(query, vars)
                 if existing_query:
                     record_id = existing_query[0]["id"]
                 else:

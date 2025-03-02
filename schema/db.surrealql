@@ -1,0 +1,8 @@
+
+
+DEFINE EVENT IF NOT EXISTS checkpoint_delete ON TABLE checkpoint WHEN ($after == NONE) THEN {
+    delete write where checkpoint_id == $before.checkpoint_id;
+};
+
+-- TODO: unique indexes on checkpoint and write
+-- use proper surreal record ids

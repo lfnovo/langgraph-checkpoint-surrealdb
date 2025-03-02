@@ -1,18 +1,50 @@
-[tool.poetry]
+[project]
 name = "langgraph-checkpoint-surrealdb"
-version = "1.4.0"
+version = "1.5.0"
 description = "A SurrealDB Checkpointer for Langgraph with both synchronous and asynchronous support."
-authors = ["Your Name <you@example.com>"]
+authors = [
+    { name = "LUIS NOVO", email = "lfnovo@gmail.com" }
+]
+dependencies = [
+    "langchain-core>=0.3.40",
+    "langgraph>=0.3.2",
+    "surrealdb>=1.0.3",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-# ... (other dependencies)
-
-[tool.poetry.dev-dependencies]
-pytest = "^8.3.4"
-pytest-asyncio = "^0.25.3"
-# ... (other dev-dependencies)
+[tool.hatch.build.targets.wheel]
+packages = ["src/langgraph_checkpoint_surrealdb"]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.1",
+    "pytest-freezegun>=0.4.2",
+    "pytest>=8.3.4",
+    "ruff>=0.8.4",
+    "pytest-asyncio>=0.25.3",
+    "dotenv>=0.9.9",
+    "langchain-openai>=0.3.7",
+]
+
+[tool.setuptools]
+package-dir = {"merovingian_api" = "src/langgraph_checkpoint_surrealdb"}
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
