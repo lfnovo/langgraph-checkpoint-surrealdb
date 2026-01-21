@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import threading
@@ -6,6 +7,44 @@ from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _load_metadata_with_fallback(
+    serde: "SerializerProtocol",
+    metadata: Any,
+    metadata_type: str,
+) -> "CheckpointMetadata":
+    """Load metadata with fallback for legacy format.
+
+    Args:
+        serde: The serializer to use.
+        metadata: The metadata to deserialize.
+        metadata_type: The type of the metadata serialization.
+
+    Returns:
+        CheckpointMetadata: The deserialized metadata.
+    """
+    if metadata is None:
+        return {}
+
+    # Try new format first (msgpack bytes)
+    try:
+        return serde.loads_typed((metadata_type, metadata))
+    except Exception:
+        pass
+
+    # Fallback for legacy format (JSON string)
+    try:
+        if isinstance(metadata, str):
+            return json.loads(metadata)
+        elif isinstance(metadata, bytes):
+            return json.loads(metadata.decode("utf-8"))
+    except Exception:
+        pass
+
+    # Return empty dict if all attempts fail
+    logger.warning("Failed to deserialize metadata, returning empty dict")
+    return {}
 
 # Type alias for clarity
 JsonDict = Dict[str, Any]
@@ -39,8 +78,8 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
     SerializerProtocol,
     get_checkpoint_id,
+    get_checkpoint_metadata,
 )
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import ChannelProtocol
 from surrealdb import AsyncSurreal, Surreal
 
@@ -64,7 +103,6 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         self.database = database
         self.user = user
         self.password = password
-        self.jsonplus_serde = JsonPlusSerializer()
         self.is_setup = False
         self.lock = threading.Lock()
 
@@ -115,9 +153,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 thread_id = str(config["configurable"]["thread_id"])
 
                 query = """
-                SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, 
-                checkpoint, metadata 
-                FROM checkpoint WHERE 
+                SELECT thread_id, checkpoint_id, parent_checkpoint_id, type,
+                checkpoint, metadata, metadata_type
+                FROM checkpoint WHERE
                 thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
                 """
 
@@ -152,6 +190,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     type_ = result_dict["type"]
                     checkpoint = result_dict["checkpoint"]
                     metadata = result_dict["metadata"]
+                    metadata_type = result_dict.get("metadata_type", type_)
                     if not get_checkpoint_id(config):
                         config = {
                             "configurable": {
@@ -163,11 +202,11 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
                     # find any pending writes
                     query = """
-                    SELECT task_id, channel, type, value, idx 
-                    FROM write 
-                    WHERE thread_id = $thread_id 
-                    AND checkpoint_ns = $checkpoint_ns 
-                    AND checkpoint_id = $checkpoint_id 
+                    SELECT task_id, channel, type, value, idx
+                    FROM write
+                    WHERE thread_id = $thread_id
+                    AND checkpoint_ns = $checkpoint_ns
+                    AND checkpoint_id = $checkpoint_id
                     ORDER BY task_id, idx
                     """
 
@@ -197,9 +236,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         checkpoint_data = self.serde.loads_typed((type_, checkpoint))
                         metadata_dict = cast(
                             CheckpointMetadata,
-                            self.jsonplus_serde.loads(metadata)
-                            if metadata is not None
-                            else {},
+                            _load_metadata_with_fallback(
+                                self.serde, metadata, metadata_type
+                            ),
                         )
                     except Exception as e:
                         logger.error(
@@ -305,9 +344,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
             config.get("configurable", {}).get("checkpoint_ns", "") if config else ""
         )
         query = """
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
-        FROM checkpoint 
-        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns 
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type
+        FROM checkpoint
+        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
         ORDER BY checkpoint_id DESC
         """
 
@@ -345,13 +384,14 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     type_ = r["type"]
                     checkpoint = r["checkpoint"]
                     metadata = r["metadata"]
+                    metadata_type = r.get("metadata_type", type_)
 
                     query = """
-                    SELECT task_id, channel, type, value, idx 
-                    FROM write 
-                    WHERE thread_id = $thread_id 
-                    AND checkpoint_ns = $checkpoint_ns 
-                    AND checkpoint_id = $checkpoint_id 
+                    SELECT task_id, channel, type, value, idx
+                    FROM write
+                    WHERE thread_id = $thread_id
+                    AND checkpoint_ns = $checkpoint_ns
+                    AND checkpoint_id = $checkpoint_id
                     ORDER BY task_id, idx
                     """
 
@@ -381,9 +421,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         checkpoint_data = self.serde.loads_typed((type_, checkpoint))
                         metadata_dict = cast(
                             CheckpointMetadata,
-                            self.jsonplus_serde.loads(metadata)
-                            if metadata is not None
-                            else {},
+                            _load_metadata_with_fallback(
+                                self.serde, metadata, metadata_type
+                            ),
                         )
                         writes = [
                             (
@@ -470,7 +510,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         checkpoint_ns = config["configurable"]["checkpoint_ns"]
         try:
             type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
-            serialized_metadata = self.jsonplus_serde.dumps(metadata)
+            metadata_type, serialized_metadata = self.serde.dumps_typed(
+                get_checkpoint_metadata(config, metadata)
+            )
         except Exception as e:
             logger.error(
                 "Failed to serialize checkpoint data",
@@ -487,9 +529,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         with self.db_connection() as connection:
             try:
                 query = """
-                SELECT id FROM checkpoint 
-                WHERE thread_id = $thread_id 
-                AND checkpoint_ns = $checkpoint_ns 
+                SELECT id FROM checkpoint
+                WHERE thread_id = $thread_id
+                AND checkpoint_ns = $checkpoint_ns
                 AND checkpoint_id = $checkpoint_id
                 """
 
@@ -513,6 +555,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     "type": type_,
                     "checkpoint": serialized_checkpoint,
                     "metadata": serialized_metadata,
+                    "metadata_type": metadata_type,
                 }
 
                 connection.upsert(record_id, merge_data)
@@ -628,9 +671,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 thread_id = str(config["configurable"]["thread_id"])
 
                 query = """
-                SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, 
-                checkpoint, metadata 
-                FROM checkpoint WHERE 
+                SELECT thread_id, checkpoint_id, parent_checkpoint_id, type,
+                checkpoint, metadata, metadata_type
+                FROM checkpoint WHERE
                 thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
                 """
 
@@ -665,6 +708,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     type_ = result_dict["type"]
                     checkpoint = result_dict["checkpoint"]
                     metadata = result_dict["metadata"]
+                    metadata_type = result_dict.get("metadata_type", type_)
                     if not get_checkpoint_id(config):
                         config = {
                             "configurable": {
@@ -676,11 +720,11 @@ class SurrealSaver(BaseCheckpointSaver[str]):
 
                     # find any pending writes
                     query = """
-                    SELECT task_id, channel, type, value, idx 
-                    FROM write 
-                    WHERE thread_id = $thread_id 
-                    AND checkpoint_ns = $checkpoint_ns 
-                    AND checkpoint_id = $checkpoint_id 
+                    SELECT task_id, channel, type, value, idx
+                    FROM write
+                    WHERE thread_id = $thread_id
+                    AND checkpoint_ns = $checkpoint_ns
+                    AND checkpoint_id = $checkpoint_id
                     ORDER BY task_id, idx
                     """
 
@@ -710,9 +754,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         checkpoint_data = self.serde.loads_typed((type_, checkpoint))
                         metadata_dict = cast(
                             CheckpointMetadata,
-                            self.jsonplus_serde.loads(metadata)
-                            if metadata is not None
-                            else {},
+                            _load_metadata_with_fallback(
+                                self.serde, metadata, metadata_type
+                            ),
                         )
                     except Exception as e:
                         logger.error(
@@ -818,9 +862,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
             config.get("configurable", {}).get("checkpoint_ns", "") if config else ""
         )
         query = """
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
-        FROM checkpoint 
-        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns 
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, metadata_type
+        FROM checkpoint
+        WHERE thread_id = $thread_id AND checkpoint_ns = $checkpoint_ns
         ORDER BY checkpoint_id DESC
         """
 
@@ -858,13 +902,14 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     type_ = r["type"]
                     checkpoint = r["checkpoint"]
                     metadata = r["metadata"]
+                    metadata_type = r.get("metadata_type", type_)
 
                     query = """
-                    SELECT task_id, channel, type, value, idx 
-                    FROM write 
-                    WHERE thread_id = $thread_id 
-                    AND checkpoint_ns = $checkpoint_ns 
-                    AND checkpoint_id = $checkpoint_id 
+                    SELECT task_id, channel, type, value, idx
+                    FROM write
+                    WHERE thread_id = $thread_id
+                    AND checkpoint_ns = $checkpoint_ns
+                    AND checkpoint_id = $checkpoint_id
                     ORDER BY task_id, idx
                     """
 
@@ -894,9 +939,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                         checkpoint_data = self.serde.loads_typed((type_, checkpoint))
                         metadata_dict = cast(
                             CheckpointMetadata,
-                            self.jsonplus_serde.loads(metadata)
-                            if metadata is not None
-                            else {},
+                            _load_metadata_with_fallback(
+                                self.serde, metadata, metadata_type
+                            ),
                         )
                         writes = [
                             (
@@ -983,7 +1028,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         checkpoint_ns = config["configurable"]["checkpoint_ns"]
         try:
             type_, serialized_checkpoint = self.serde.dumps_typed(checkpoint)
-            serialized_metadata = self.jsonplus_serde.dumps(metadata)
+            metadata_type, serialized_metadata = self.serde.dumps_typed(
+                get_checkpoint_metadata(config, metadata)
+            )
         except Exception as e:
             logger.error(
                 "Failed to serialize checkpoint data",
@@ -1000,9 +1047,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         async with self.adb_connection() as connection:
             try:
                 query = """
-                SELECT id FROM checkpoint 
-                WHERE thread_id = $thread_id 
-                AND checkpoint_ns = $checkpoint_ns 
+                SELECT id FROM checkpoint
+                WHERE thread_id = $thread_id
+                AND checkpoint_ns = $checkpoint_ns
                 AND checkpoint_id = $checkpoint_id
                 """
 
@@ -1026,6 +1073,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                     "type": type_,
                     "checkpoint": serialized_checkpoint,
                     "metadata": serialized_metadata,
+                    "metadata_type": metadata_type,
                 }
 
                 await connection.upsert(record_id, merge_data)
