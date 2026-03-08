@@ -133,6 +133,15 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 await db.close()
 
     def setup(self) -> None:
+        with self.db_connection() as db:
+            db.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+            db.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+        self.is_setup = True
+
+    async def asetup(self) -> None:
+        async with self.adb_connection() as db:
+            await db.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+            await db.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
         self.is_setup = True
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
