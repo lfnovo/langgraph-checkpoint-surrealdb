@@ -54,17 +54,17 @@ jobs:
         run: |
           uv sync --frozen
           uv run python - <<EOF
-          import surrealdb
-          conn = surrealdb.connect(
-            host="${{ env.TEST_SURREAL_HOST }}",
-            port="${{ env.TEST_SURREAL_PORT }}",
-            user="${{ env.TEST_SURREAL_USERNAME }}",
-            password="${{ env.TEST_SURREAL_PASSWORD }}",
-            namespace="${{ env.TEST_SURREAL_NAMESPACE }}",
-            database="${{ env.TEST_SURREAL_DATABASE }}",
-          )
-          conn.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
-          conn.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+          from surrealdb import Surreal
+
+          db = Surreal(f"ws://${{ env.TEST_SURREAL_HOST }}:${{ env.TEST_SURREAL_PORT }}")
+          db.use("${{ env.TEST_SURREAL_NAMESPACE }}", "${{ env.TEST_SURREAL_DATABASE }}")
+          db.signin({
+            "username": "${{ env.TEST_SURREAL_USERNAME }}",
+            "password": "${{ env.TEST_SURREAL_PASSWORD }}",
+          })
+          db.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+          db.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+          db.close()
           EOF
       - name: Run tests
         shell: bash
