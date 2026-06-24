@@ -1,5 +1,8 @@
 name: ci
 
+on:
+  push:
+
 jobs:
   test:
     name: LangGraph Checkpoint SurrealDB tests
@@ -33,6 +36,19 @@ jobs:
           python-version: '3.13'
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+      - name: Wait for SurrealDB
+        shell: bash
+        run: |
+          set -o pipefail
+          for attempt in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:8000/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "SurrealDB did not become healthy in time."
+          docker logs "${{ job.services.surrealdb.id }}" || true
+          exit 1
       - name: Setup SurrealDB
         shell: bash
         run: |
