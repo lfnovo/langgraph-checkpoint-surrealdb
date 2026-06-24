@@ -1,5 +1,6 @@
 import asyncio
 import operator
+import os
 import uuid
 from typing import cast
 from uuid import uuid4
@@ -26,14 +27,25 @@ def event_loop():
     loop.close()
 
 
+TEST_SURREAL_HOST = os.environ.get("TEST_SURREAL_HOST", "localhost")
+TEST_SURREAL_PORT = os.environ.get("TEST_SURREAL_PORT", "8018")
+TEST_SURREAL_USERNAME = os.environ.get("TEST_SURREAL_USERNAME", "root")
+TEST_SURREAL_PASSWORD = os.environ.get("TEST_SURREAL_PASSWORD", "root")
+TEST_SURREAL_NAMESPACE = os.environ.get("TEST_SURREAL_NAMESPACE", "ns")
+TEST_SURREAL_DATABASE = os.environ.get("TEST_SURREAL_DATABASE", "db")
+
 # Global memory instance for stress tests (can be reused or reinitialized per test if needed)
 memory = SurrealSaver(
-    url="ws://localhost:8018/rpc",
-    user="root",
-    password="root",
-    namespace="ns",
-    database="db",
+    url=f"ws://{TEST_SURREAL_HOST}:{TEST_SURREAL_PORT}/rpc",
+    user=TEST_SURREAL_USERNAME,
+    password=TEST_SURREAL_PASSWORD,
+    namespace=TEST_SURREAL_NAMESPACE,
+    database=TEST_SURREAL_DATABASE,
 )
+with memory.db_connection() as conn:
+    conn.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+    conn.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+memory.setup()
 
 
 class ThreadState(BaseModel):
@@ -88,9 +100,9 @@ class TestSyncStress:
         # Since the graph overwrites state per invocation, final state should contain 1 message.
         result_state = compiled_graph_sync.get_state(config=config)
         total_messages = len(result_state.values.get("messages", []))
-        assert total_messages == expected_total, (
-            f"Expected {expected_total} messages, got {total_messages}"
-        )
+        assert (
+            total_messages == expected_total
+        ), f"Expected {expected_total} messages, got {total_messages}"
 
 
 class TestAsyncStress:
@@ -111,6 +123,6 @@ class TestAsyncStress:
             *(invoke_once() for _ in range(concurrent_tasks))
         )
         for count in results:
-            assert count == 1, (
-                f"Each async invocation should return 1 message, got {count}"
-            )
+            assert (
+                count == 1
+            ), f"Each async invocation should return 1 message, got {count}"

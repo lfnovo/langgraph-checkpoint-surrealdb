@@ -1,0 +1,53 @@
+name: ci
+
+jobs:
+  test:
+    name: LangGraph Checkpoint SurrealDB tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      TEST_SURREAL_HOST: 127.0.0.1
+      TEST_SURREAL_PORT: 8000
+      TEST_SURREAL_NAMESPACE: test_ns
+      TEST_SURREAL_DATABASE: test_db
+      TEST_SURREAL_USERNAME: root
+      TEST_SURREAL_PASSWORD: secret
+    services:
+      surrealdb:
+        image: docker.io/surrealdb/surrealdb:latest
+        ports:
+          - 8000:8000
+        command: start
+        env:
+          SURREAL_USER: ${{ env.TEST_SURREAL_USERNAME }}
+          SURREAL_PASS: ${{ env.TEST_SURREAL_PASSWORD }}
+          SURREAL_PATH: rocksdb:/tmp/test.db
+          DEFAULT_NAMESPACE: ${{ env.TEST_SURREAL_NAMESPACE }}
+          DEFAULT_DATABASE: ${{ env.TEST_SURREAL_DATABASE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Setup SurrealDB
+        shell: bash
+        run: |
+          uv sync --frozen
+          uv run python -c <EOF
+          import surrealdb
+          conn = surrealdb.connect(
+            host="${{ env.TEST_SURREAL_HOST }}",
+            port="${{ env.TEST_SURREAL_PORT }}",
+            namespace="${{ env.TEST_SURREAL_NAMESPACE }}",
+            database="${{ env.TEST_SURREAL_DATABASE }}",
+          )
+          conn.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+          conn.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+          EOF
+      - name: Run tests
+        shell: bash
+        run: uv run pytest -q
