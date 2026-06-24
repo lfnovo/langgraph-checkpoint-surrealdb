@@ -1,7 +1,9 @@
 import operator
+import os
 import uuid
 from typing import Annotated
 
+from langchain_core.language_models import ParrotFakeChatModel
 import pytest
 import pytest_asyncio
 from dotenv import load_dotenv
@@ -16,6 +18,14 @@ from langgraph_checkpoint_surrealdb import SurrealSaver
 load_dotenv()
 
 
+TEST_SURREAL_HOST = os.environ.get("TEST_SURREAL_HOST", "localhost")
+TEST_SURREAL_PORT = os.environ.get("TEST_SURREAL_PORT", "8018")
+TEST_SURREAL_USERNAME = os.environ.get("TEST_SURREAL_USERNAME", "root")
+TEST_SURREAL_PASSWORD = os.environ.get("TEST_SURREAL_PASSWORD", "root")
+TEST_SURREAL_NAMESPACE = os.environ.get("TEST_SURREAL_NAMESPACE", "ns")
+TEST_SURREAL_DATABASE = os.environ.get("TEST_SURREAL_DATABASE", "db")
+
+
 class ThreadState(BaseModel):
     messages: Annotated[list, operator.add] = Field(default_factory=list)
 
@@ -24,7 +34,7 @@ def get_model_answer(state: ThreadState, config: RunnableConfig) -> dict:
     if state.messages == [] or state.messages == [""]:
         return {"messages": []}
 
-    model = ChatOpenAI(model="gpt-4")
+    model = ParrotFakeChatModel()
     sys_prompt = "You are a helpful assistant"
     ai_message = model.invoke([sys_prompt] + state.messages)
     return {"messages": [ai_message]}
@@ -33,12 +43,18 @@ def get_model_answer(state: ThreadState, config: RunnableConfig) -> dict:
 @pytest_asyncio.fixture(scope="function")
 async def memory():
     saver = SurrealSaver(
-        url="ws://localhost:8018/rpc",
-        user="root",
-        password="root",
-        namespace="ns",
-        database="db",
+        url=f"ws://{TEST_SURREAL_HOST}:{TEST_SURREAL_PORT}/rpc",
+        user=TEST_SURREAL_USERNAME,
+        password=TEST_SURREAL_PASSWORD,
+        namespace=TEST_SURREAL_NAMESPACE,
+        database=TEST_SURREAL_DATABASE,
     )
+
+    async with saver.adb_connection() as conn:
+        await conn.query("DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS")
+        await conn.query("DEFINE TABLE IF NOT EXISTS `write` SCHEMALESS")
+    saver.setup()
+
     yield saver
     # Clean up connections
     try:
