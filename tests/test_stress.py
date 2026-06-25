@@ -94,6 +94,24 @@ class TestSyncStress:
         )
 
 
+class TestStateHistory:
+    def test_get_state_history(self, compiled_graph_sync):
+        """get_state_history exercises list(), which reads control writes
+        (e.g. ``branch:to:*``) serialized as ``("null", b"")``. Deserializing
+        these requires using each write's own ``type`` field rather than the
+        checkpoint's type, otherwise an empty msgpack payload blows up.
+        """
+        thread_id = str(uuid4())
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        message = HumanMessage(content="History test message")
+        for _ in range(3):
+            compiled_graph_sync.invoke(input={"messages": message}, config=config)
+
+        # Must not raise while deserializing historical checkpoints/writes.
+        history = list(compiled_graph_sync.get_state_history(config))
+        assert len(history) > 0, "Expected a non-empty checkpoint history"
+
+
 class TestAsyncStress:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("concurrent_tasks", [10, 20])

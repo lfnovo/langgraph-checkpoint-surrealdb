@@ -286,7 +286,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             (
                                 r["task_id"],
                                 r["channel"],
-                                self.serde.loads_typed((type_, r["value"])),
+                                self.serde.loads_typed((r["type"], r["value"])),
                             )
                             for r in results
                         ]
@@ -457,7 +457,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             (
                                 tr["task_id"],
                                 tr["channel"],
-                                self.serde.loads_typed((type_, tr["value"])),
+                                self.serde.loads_typed((tr["type"], tr["value"])),
                             )
                             for tr in task_results
                         ]
@@ -804,7 +804,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             (
                                 r["task_id"],
                                 r["channel"],
-                                self.serde.loads_typed((type_, r["value"])),
+                                self.serde.loads_typed((r["type"], r["value"])),
                             )
                             for r in results
                         ]
@@ -975,7 +975,7 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                             (
                                 tr["task_id"],
                                 tr["channel"],
-                                self.serde.loads_typed((type_, tr["value"])),
+                                self.serde.loads_typed((tr["type"], tr["value"])),
                             )
                             for tr in task_results
                         ]
