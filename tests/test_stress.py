@@ -1,5 +1,6 @@
 import asyncio
 import operator
+import os
 import uuid
 from typing import cast
 from uuid import uuid4
@@ -28,7 +29,7 @@ def event_loop():
 
 # Global memory instance for stress tests (can be reused or reinitialized per test if needed)
 memory = SurrealSaver(
-    url="ws://localhost:8018/rpc",
+    url=os.environ.get("SURREALDB_URL", "ws://localhost:8018/rpc"),
     user="root",
     password="root",
     namespace="ns",
@@ -90,6 +91,81 @@ class TestSyncStress:
         total_messages = len(result_state.values.get("messages", []))
         assert total_messages == expected_total, (
             f"Expected {expected_total} messages, got {total_messages}"
+        )
+
+
+class TestStateHistory:
+    def test_get_state_history(self, compiled_graph_sync):
+        """get_state_history exercises list(), which reads control writes
+        (e.g. ``branch:to:*``) serialized as ``("null", b"")``. Deserializing
+        these requires using each write's own ``type`` field rather than the
+        checkpoint's type, otherwise an empty msgpack payload blows up.
+        """
+        thread_id = str(uuid4())
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        message = HumanMessage(content="History test message")
+        for _ in range(3):
+            compiled_graph_sync.invoke(input={"messages": message}, config=config)
+
+        # Must not raise while deserializing historical checkpoints/writes.
+        history = list(compiled_graph_sync.get_state_history(config))
+        assert len(history) > 0, "Expected a non-empty checkpoint history"
+
+
+class TestCascadeDelete:
+    def test_cascade_delete_scoped_to_thread(self):
+        """Deleting a checkpoint must only delete the writes belonging to the
+        same thread/namespace, even when another thread happens to share the
+        same checkpoint_id. Guards the scoping of the ``checkpoint_delete``
+        event.
+        """
+        cid = f"shared-{uuid4()}"
+        thread_a = f"thread-A-{uuid4()}"
+        thread_b = f"thread-B-{uuid4()}"
+
+        with memory.db_connection() as conn:
+            for tid in (thread_a, thread_b):
+                conn.create(
+                    "checkpoint",
+                    {
+                        "thread_id": tid,
+                        "checkpoint_ns": "",
+                        "checkpoint_id": cid,
+                        "type": "null",
+                        "checkpoint": b"",
+                        "metadata": b"",
+                        "metadata_type": "null",
+                    },
+                )
+                conn.create(
+                    "write",
+                    {
+                        "thread_id": tid,
+                        "checkpoint_ns": "",
+                        "checkpoint_id": cid,
+                        "task_id": "task",
+                        "idx": 0,
+                        "channel": "messages",
+                        "type": "null",
+                        "value": b"",
+                        "task_path": "",
+                    },
+                )
+
+            # Delete only thread A's checkpoint; the event should cascade to
+            # thread A's writes only.
+            conn.query(
+                "DELETE checkpoint WHERE thread_id = $tid AND checkpoint_id = $cid",
+                {"tid": thread_a, "cid": cid},
+            )
+            remaining = conn.query(
+                "SELECT thread_id FROM write WHERE checkpoint_id = $cid",
+                {"cid": cid},
+            )
+
+        remaining_threads = sorted(r["thread_id"] for r in remaining)
+        assert remaining_threads == [thread_b], (
+            f"Only thread B's writes should remain, got {remaining_threads}"
         )
 
 

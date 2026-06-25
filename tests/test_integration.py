@@ -1,4 +1,5 @@
 import operator
+import os
 import uuid
 from typing import Annotated
 
@@ -14,6 +15,15 @@ from pydantic import BaseModel, Field
 from langgraph_checkpoint_surrealdb import SurrealSaver
 
 load_dotenv()
+
+SURREALDB_URL = os.environ.get("SURREALDB_URL", "ws://localhost:8018/rpc")
+
+# These tests call a real OpenAI model; skip them when no key is configured
+# (e.g. CI on forks) so the checkpointer is still exercised via the stress suite.
+requires_openai = pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY not set",
+)
 
 
 class ThreadState(BaseModel):
@@ -33,7 +43,7 @@ def get_model_answer(state: ThreadState, config: RunnableConfig) -> dict:
 @pytest_asyncio.fixture(scope="function")
 async def memory():
     saver = SurrealSaver(
-        url="ws://localhost:8018/rpc",
+        url=SURREALDB_URL,
         user="root",
         password="root",
         namespace="ns",
@@ -70,6 +80,7 @@ def input_data():
     return {"messages": [HumanMessage(content="Oi")]}
 
 
+@requires_openai
 @pytest.mark.asyncio
 async def test_sync_invocation(graph, input_data):
     thread = str(uuid.uuid4())
@@ -83,6 +94,7 @@ async def test_sync_invocation(graph, input_data):
     assert messages, "Messages should not be empty"
 
 
+@requires_openai
 @pytest.mark.asyncio
 async def test_async_invocation(graph, input_data):
     thread = str(uuid.uuid4())
