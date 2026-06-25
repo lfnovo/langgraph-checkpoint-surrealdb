@@ -1,0 +1,50 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        surrealdb: [v2, v3]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Start SurrealDB ${{ matrix.surrealdb }}
+      run: |
+        docker run -d --name surrealdb -p 8018:8000 \
+          surrealdb/surrealdb:${{ matrix.surrealdb }} \
+          start --user root --pass root memory
+        echo "Waiting for SurrealDB to be ready..."
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:8018/version >/dev/null; then
+            echo "SurrealDB is ready: $(curl -s http://localhost:8018/version)"
+            break
+          fi
+          sleep 1
+        done
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: uv sync
+
+    - name: Run tests
+      env:
+        SURREALDB_URL: ws://localhost:8018/rpc
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: uv run pytest tests/ -v

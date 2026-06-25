@@ -50,6 +50,20 @@ def _load_metadata_with_fallback(
 JsonDict = Dict[str, Any]
 
 
+# Schema setup run lazily on the first connection. The statements are
+# idempotent (``IF NOT EXISTS``). Defining the tables up front is required for
+# the surrealdb SDK >= 2.0, where ``SELECT`` against a non-existent table raises
+# a ``NotFoundError`` instead of returning an empty result set.
+SETUP_QUERY = """
+DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS write SCHEMALESS;
+DEFINE EVENT IF NOT EXISTS checkpoint_delete ON TABLE checkpoint
+WHEN ($after == NONE) THEN {
+    delete write where checkpoint_id == $before.checkpoint_id;
+};
+"""
+
+
 class CheckpointError(Exception):
     """Base exception for checkpoint operations."""
 
@@ -111,6 +125,11 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         db = Surreal(self.url)
         db.signin({"username": self.user, "password": self.password})
         db.use(self.namespace, self.database)
+        if not self.is_setup:
+            with self.lock:
+                if not self.is_setup:
+                    db.query(SETUP_QUERY)
+                    self.is_setup = True
         scheme = urlparse(self.url).scheme.lower()
         try:
             yield db
@@ -124,6 +143,9 @@ class SurrealSaver(BaseCheckpointSaver[str]):
         db = AsyncSurreal(self.url)
         await db.signin({"username": self.user, "password": self.password})
         await db.use(self.namespace, self.database)
+        if not self.is_setup:
+            await db.query(SETUP_QUERY)
+            self.is_setup = True
         scheme = urlparse(self.url).scheme.lower()
         try:
             yield db
@@ -133,7 +155,13 @@ class SurrealSaver(BaseCheckpointSaver[str]):
                 await db.close()
 
     def setup(self) -> None:
-        self.is_setup = True
+        """Create the checkpoint/write tables if they don't exist.
+
+        Runs automatically on the first connection, but can be called
+        explicitly to provision the schema ahead of time.
+        """
+        with self.db_connection():
+            pass
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """Get a checkpoint tuple from the database.

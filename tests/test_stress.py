@@ -1,5 +1,6 @@
 import asyncio
 import operator
+import os
 import uuid
 from typing import cast
 from uuid import uuid4
@@ -28,7 +29,7 @@ def event_loop():
 
 # Global memory instance for stress tests (can be reused or reinitialized per test if needed)
 memory = SurrealSaver(
-    url="ws://localhost:8018/rpc",
+    url=os.environ.get("SURREALDB_URL", "ws://localhost:8018/rpc"),
     user="root",
     password="root",
     namespace="ns",
