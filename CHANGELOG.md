@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Compatibility with the surrealdb SDK 2.0, where `SELECT` on a non-existent table raises `NotFoundError` instead of returning an empty result. Tables are now provisioned lazily on the first connection, fixing read-before-write failures (and the cascading `KeyError` seen under concurrent async usage)
 - `get_state_history()` / `list()` crashing on control writes (e.g. `branch:to:*`) that serialize to `("null", b"")`. Pending writes are now deserialized using each write's own `type` field instead of the checkpoint's type, which previously fed an empty payload to the msgpack decoder
+- Scoped the `checkpoint_delete` cascade event to `thread_id` + `checkpoint_ns` + `checkpoint_id` so deleting a checkpoint can no longer remove writes from another thread/namespace that happens to share the same `checkpoint_id`
 
 ## [2.0.0] - 2026-01-21
 

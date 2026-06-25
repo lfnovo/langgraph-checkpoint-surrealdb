@@ -1,6 +1,11 @@
-# Surreal Saver v1.4.0
+# Surreal Saver
 
 A SurrealDB Checkpointer for Langgraph with both synchronous and asynchronous support.
+
+## Requirements
+
+- A running **SurrealDB server v2.0.0 or newer** (tested against v2.6.x and v3.1.x).
+  The underlying `surrealdb` Python SDK (>= 2.0) no longer supports older servers.
 
 ## Installation
 

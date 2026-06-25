@@ -59,7 +59,9 @@ DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS write SCHEMALESS;
 DEFINE EVENT IF NOT EXISTS checkpoint_delete ON TABLE checkpoint
 WHEN ($after == NONE) THEN {
-    delete write where checkpoint_id == $before.checkpoint_id;
+    delete write where thread_id == $before.thread_id
+        AND checkpoint_ns == $before.checkpoint_ns
+        AND checkpoint_id == $before.checkpoint_id;
 };
 """
 

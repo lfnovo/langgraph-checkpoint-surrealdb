@@ -112,6 +112,63 @@ class TestStateHistory:
         assert len(history) > 0, "Expected a non-empty checkpoint history"
 
 
+class TestCascadeDelete:
+    def test_cascade_delete_scoped_to_thread(self):
+        """Deleting a checkpoint must only delete the writes belonging to the
+        same thread/namespace, even when another thread happens to share the
+        same checkpoint_id. Guards the scoping of the ``checkpoint_delete``
+        event.
+        """
+        cid = f"shared-{uuid4()}"
+        thread_a = f"thread-A-{uuid4()}"
+        thread_b = f"thread-B-{uuid4()}"
+
+        with memory.db_connection() as conn:
+            for tid in (thread_a, thread_b):
+                conn.create(
+                    "checkpoint",
+                    {
+                        "thread_id": tid,
+                        "checkpoint_ns": "",
+                        "checkpoint_id": cid,
+                        "type": "null",
+                        "checkpoint": b"",
+                        "metadata": b"",
+                        "metadata_type": "null",
+                    },
+                )
+                conn.create(
+                    "write",
+                    {
+                        "thread_id": tid,
+                        "checkpoint_ns": "",
+                        "checkpoint_id": cid,
+                        "task_id": "task",
+                        "idx": 0,
+                        "channel": "messages",
+                        "type": "null",
+                        "value": b"",
+                        "task_path": "",
+                    },
+                )
+
+            # Delete only thread A's checkpoint; the event should cascade to
+            # thread A's writes only.
+            conn.query(
+                "DELETE checkpoint WHERE thread_id = $tid AND checkpoint_id = $cid",
+                {"tid": thread_a, "cid": cid},
+            )
+            remaining = conn.query(
+                "SELECT thread_id FROM write WHERE checkpoint_id = $cid",
+                {"cid": cid},
+            )
+
+        remaining_threads = sorted(r["thread_id"] for r in remaining)
+        assert remaining_threads == [thread_b], (
+            f"Only thread B's writes should remain, got {remaining_threads}"
+        )
+
+
 class TestAsyncStress:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("concurrent_tasks", [10, 20])
